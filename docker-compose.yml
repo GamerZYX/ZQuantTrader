@@ -1,0 +1,97 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: zqt_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zquant}
+      MYSQL_USER: ${MYSQL_USER:-zquant}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zquantpass}
+    ports:
+      - "3306:3306"
+    command: ["--default-authentication-plugin=mysql_native_password", "--log_bin_trust_function_creators=1"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u$${MYSQL_USER}", "-p$${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    container_name: zqt_redis
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ./backend
+    container_name: zqt_api
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://zquant:zquantpass@mysql:3306/zquant}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TF_SERVING_URL=${TF_SERVING_URL:-http://tfserving:8501/v1/models/zqt_model:predict}
+      - PYTHONUNBUFFERED=1
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ./backend
+    container_name: zqt_worker
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://zquant:zquantpass@mysql:3306/zquant}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PYTHONUNBUFFERED=1
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=INFO
+    volumes:
+      - ./backend:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: zqt_frontend
+    environment:
+      - BACKEND_URL=${BACKEND_URL:-http://api:8000}
+      - PYTHONUNBUFFERED=1
+    command: python app.py
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+  tfserving:
+    image: tensorflow/serving:2.13.0
+    container_name: zqt_tfserving
+    environment:
+      - MODEL_NAME=zqt_model
+    # Placeholder model mount point. Replace with your exported model directory.
+    volumes:
+      - ./ml/model:/models/zqt_model
+    command: --port=8500 --rest_api_port=8501 --model_name=zqt_model --model_base_path=/models/zqt_model
+    ports:
+      - "8501:8501"
+    profiles: ["ml"]
+
+volumes:
+  mysql_data:
+
+
